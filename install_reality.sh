@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Reality 协议一键安装脚本 (Xray VLESS + Reality)
+# Reality 协议一键安装脚本 (Sing-Box VLESS + Reality)
 # 默认配置: SNI=www.notion.so, 端口=443, 指纹=chrome
 
 set -euo pipefail
@@ -20,12 +20,11 @@ error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
 success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
 
 # --- 路径配置 ---
-XRAY_DIR="/usr/local/bin"
-XRAY_BIN="${XRAY_DIR}/xray"
-XRAY_CONFIG_DIR="/usr/local/etc/xray"
-XRAY_CONFIG_FILE="${XRAY_CONFIG_DIR}/config.json"
-XRAY_SERVICE_FILE="/etc/systemd/system/xray.service"
-INFO_FILE="${XRAY_CONFIG_DIR}/.reality_info"
+SINGBOX_BIN="/usr/local/bin/sing-box"
+SINGBOX_CONFIG_DIR="/usr/local/etc/sing-box"
+SINGBOX_CONFIG_FILE="${SINGBOX_CONFIG_DIR}/config.json"
+SINGBOX_SERVICE_FILE="/etc/systemd/system/sing-box.service"
+INFO_FILE="${SINGBOX_CONFIG_DIR}/.reality_info"
 
 # --- 默认值 ---
 DEFAULT_PORT=443
@@ -56,28 +55,28 @@ get_ips() {
 # --- 检查 root ---
 [ "$(id -u)" -ne 0 ] && error "请使用 root 用户运行此脚本"
 
-# --- 检测系统架构 ---
-case "$(uname -m)" in
-    x86_64)  ARCH="64" ;;
-    aarch64|arm64) ARCH="arm64-v8a" ;;
-    armv7l)  ARCH="armv7a" ;;
-    *)       error "不支持的架构: $(uname -m)" ;;
-esac
-
 # --- 安装依赖 ---
 info "安装依赖..."
 apt-get update -qq >/dev/null 2>&1 || true
 apt-get install -y -qq curl wget openssl qrencode >/dev/null 2>&1 || error "依赖安装失败"
 
-# --- 安装 Xray ---
-install_xray() {
-    if [ -f "$XRAY_BIN" ]; then
-        info "检测到已安装 Xray，跳过下载"
+# --- 安装 Sing-Box ---
+install_singbox() {
+    if [ -f "$SINGBOX_BIN" ]; then
+        info "检测到已安装 Sing-Box，跳过下载"
         return 0
     fi
 
-    info "正在下载安装 Xray..."
-    bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install || error "Xray 安装失败"
+    info "正在下载安装 Sing-Box..."
+    bash -c "$(curl -fsSL https://sing-box.app/deb-install.sh)" || error "Sing-Box 安装失败"
+}
+
+# --- 生成 Reality 密钥对 ---
+gen_keypair() {
+    local keypair
+    keypair=$($SINGBOX_BIN generate reality-keypair 2>/dev/null) || error "生成 X25519 密钥对失败"
+    REALITY_PRIVATE_KEY=$(echo "$keypair" | awk -F': ' '/PrivateKey/ {print $2}')
+    REALITY_PUBLIC_KEY=$(echo "$keypair" | awk -F': ' '/PublicKey/ {print $2}')
 }
 
 # --- 获取或读取配置 ---
@@ -96,10 +95,7 @@ load_or_gen_config() {
 
     # 生成密钥对
     if [ -z "${REALITY_PRIVATE_KEY:-}" ] || [ -z "${REALITY_PUBLIC_KEY:-}" ]; then
-        local keypair
-        keypair=$($XRAY_BIN x25519 2>/dev/null) || error "生成 X25519 密钥对失败"
-        REALITY_PRIVATE_KEY=$(echo "$keypair" | awk '/Private/ {print $3}')
-        REALITY_PUBLIC_KEY=$(echo "$keypair" | awk '/Public/ {print $3}')
+        gen_keypair
     fi
 }
 
@@ -131,57 +127,51 @@ configure() {
     fi
 }
 
-# --- 写入 Xray 配置 ---
+# --- 写入 Sing-Box 配置 ---
 write_config() {
-    mkdir -p "$XRAY_CONFIG_DIR"
+    mkdir -p "$SINGBOX_CONFIG_DIR"
 
-    cat > "$XRAY_CONFIG_FILE" <<EOF
+    cat > "$SINGBOX_CONFIG_FILE" <<EOF
 {
     "log": {
-        "loglevel": "warning"
+        "level": "warn",
+        "timestamp": true
     },
     "inbounds": [
         {
-            "port": ${REALITY_PORT},
-            "protocol": "vless",
-            "settings": {
-                "clients": [
-                    {
-                        "id": "${REALITY_UUID}",
-                        "flow": "xtls-rprx-vision"
-                    }
-                ],
-                "decryption": "none"
-            },
-            "streamSettings": {
-                "network": "tcp",
-                "security": "reality",
-                "realitySettings": {
-                    "show": false,
-                    "dest": "${REALITY_SNI}:443",
-                    "xver": 0,
-                    "serverNames": [
-                        "${REALITY_SNI}"
-                    ],
-                    "privateKey": "${REALITY_PRIVATE_KEY}",
-                    "shortIds": [
-                        "${REALITY_SHORT_ID}"
-                    ]
+            "type": "vless",
+            "tag": "vless-reality-in",
+            "listen": "::",
+            "listen_port": ${REALITY_PORT},
+            "users": [
+                {
+                    "name": "reality-user",
+                    "uuid": "${REALITY_UUID}",
+                    "flow": "xtls-rprx-vision"
                 }
-            },
-            "sniffing": {
+            ],
+            "tls": {
                 "enabled": true,
-                "destOverride": ["http", "tls", "quic"]
+                "server_name": "${REALITY_SNI}",
+                "reality": {
+                    "enabled": true,
+                    "handshake": {
+                        "server": "${REALITY_SNI}",
+                        "server_port": 443
+                    },
+                    "private_key": "${REALITY_PRIVATE_KEY}",
+                    "short_id": ["${REALITY_SHORT_ID}"]
+                }
             }
         }
     ],
     "outbounds": [
         {
-            "protocol": "freedom",
+            "type": "direct",
             "tag": "direct"
         },
         {
-            "protocol": "blackhole",
+            "type": "block",
             "tag": "block"
         }
     ]
@@ -201,23 +191,21 @@ EOF
     chmod 600 "$INFO_FILE"
 
     # 创建/更新 systemd 服务
-    if [ ! -f "$XRAY_SERVICE_FILE" ]; then
-        cat > "$XRAY_SERVICE_FILE" <<'EOF'
+    if [ ! -f "$SINGBOX_SERVICE_FILE" ]; then
+        cat > "$SINGBOX_SERVICE_FILE" <<'EOF'
 [Unit]
-Description=Xray Service
-Documentation=https://github.com/xtls
+Description=sing-box service
+Documentation=https://sing-box.sagernet.org
 After=network.target nss-lookup.target
 
 [Service]
-User=nobody
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
-AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
-NoNewPrivileges=true
-ExecStart=/usr/local/bin/xray run -config /usr/local/etc/xray/config.json
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_SYS_PTRACE
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_SYS_PTRACE
+ExecStart=/usr/local/bin/sing-box run -c /usr/local/etc/sing-box/config.json
+ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
-RestartPreventExitStatus=23
-LimitNPROC=10000
-LimitNOFILE=1000000
+RestartSec=10s
+LimitNOFILE=infinity
 
 [Install]
 WantedBy=multi-user.target
@@ -228,20 +216,26 @@ EOF
 # --- 启动服务 ---
 start_service() {
     systemctl daemon-reload
-    systemctl enable xray >/dev/null 2>&1
-    systemctl restart xray
+    systemctl enable sing-box >/dev/null 2>&1
+    systemctl restart sing-box
     sleep 1
-    if systemctl is-active xray >/dev/null 2>&1; then
-        success "Xray 服务启动成功"
+    if systemctl is-active sing-box >/dev/null 2>&1; then
+        success "Sing-Box 服务启动成功"
     else
-        error "Xray 服务启动失败，请运行 journalctl -u xray -xe 查看日志"
+        error "Sing-Box 服务启动失败，请运行 journalctl -u sing-box -xe 查看日志"
     fi
 }
 
 # --- 输出客户端信息 ---
 print_client_info() {
-    local host="${SERVER_IP4:-${SERVER_IP6:-服务器IP}}"
-    [ -n "$SERVER_IP6" ] && host="${SERVER_IP4:-[$SERVER_IP6]}"
+    local host
+    if [ -n "${SERVER_IP4:-}" ]; then
+        host="$SERVER_IP4"
+    elif [ -n "${SERVER_IP6:-}" ]; then
+        host="[$SERVER_IP6]"
+    else
+        host="服务器IP"
+    fi
 
     # VLESS 分享链接
     local vless_link="vless://${REALITY_UUID}@${host}:${REALITY_PORT}?security=reality&sni=${REALITY_SNI}&fp=${REALITY_FINGERPRINT}&pbk=${REALITY_PUBLIC_KEY}&sid=${REALITY_SHORT_ID}&type=tcp&flow=xtls-rprx-vision&encryption=none#Reality-${host}"
@@ -269,17 +263,17 @@ print_client_info() {
     fi
     echo
     echo -e "${GREEN}配置信息已保存到: ${INFO_FILE}${NC}"
-    echo -e "${GREEN}Xray 配置文件: ${XRAY_CONFIG_FILE}${NC}"
+    echo -e "${GREEN}Sing-Box 配置文件: ${SINGBOX_CONFIG_FILE}${NC}"
     echo
 }
 
 # --- 主流程 ---
 main() {
-    echo -e "${CYAN}${BOLD}Reality 协议一键安装脚本${NC}"
+    echo -e "${CYAN}${BOLD}Reality 协议一键安装脚本 (Sing-Box)${NC}"
     echo
 
     get_ips
-    install_xray
+    install_singbox
     load_or_gen_config
 
     if [ "$#" -ge 1 ] && [ "$1" == "--auto" ]; then
