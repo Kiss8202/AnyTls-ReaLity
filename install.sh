@@ -75,7 +75,7 @@ SOCKS_USER=""
 SOCKS_PASS=""
 
 # 默认SNI
-DEFAULT_SNI="www.oracle.com"
+DEFAULT_SNI="www.notion.so"
 DEFAULT_SNI1="www.oracle.com,www.mozilla.org"
 
 # Alpine 标记
